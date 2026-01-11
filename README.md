@@ -12,8 +12,10 @@
 グリッド状（例：4×4、5×5）に分割され、順序だけがシャッフルされた画像を解析し、  
 元の並びを自動的に推定・復元する **画像解析ツール** です。
 
-いわゆる「16パズル風」「タイルシャッフル形式」の画像に対して、  
+いわゆる「16(15)パズル風」「タイルシャッフル形式」の画像に対して、  
 **境界の画素情報を用いた探索アルゴリズム** により、元画像を再構築します。
+
+![Example](sample1_(OK).png)
 
 ---
 
@@ -120,7 +122,7 @@ images which have been divided into a grid (e.g. 4×4, 5×5) and shuffled in til
 It automatically estimates the original layout using **pixel-boundary similarity**
 and reconstructs the image via a practical search algorithm.
 
-This tool targets so-called *“16-puzzle style”* or *tile-shuffled images*.
+This tool targets so-called *“16(15)-puzzle style”* or *tile-shuffled images*.
 
 ---
 
