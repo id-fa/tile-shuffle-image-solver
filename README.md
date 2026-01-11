@@ -10,7 +10,7 @@
 
 **Tile Shuffle Image Solver** は、  
 グリッド状（例：4×4、5×5）に分割され、順序だけがシャッフルされた画像を解析し、  
-元の並びを自動的に推定・復元する **汎用的な画像解析ツール** です。
+元の並びを自動的に推定・復元する **画像解析ツール** です。
 
 いわゆる「16パズル風」「タイルシャッフル形式」の画像に対して、  
 **境界の画素情報を用いた探索アルゴリズム** により、元画像を再構築します。
@@ -25,7 +25,7 @@
 - **ビームサーチ**による現実的な探索時間
 - 1px 単位のズレや JPEG 圧縮差に強い
 - PHP（GD）単体で動作
-- PHP 8.2+ 対応（E_DEPRECATED 対策済み）
+- PHP 8.2+ 対応
 - 一度解析した結果を `mapping.txt` として保存・再利用可能
 
 ---
@@ -43,7 +43,7 @@
 
 - PHP 8.2 以上
 - GD 拡張が有効であること
-- JPEG 画像入力（PNG 等は要調整）
+- JPEG/PNG 画像入力
 
 ---
 
@@ -132,7 +132,7 @@ This tool targets so-called *“16-puzzle style”* or *tile-shuffled images*.
 * **Beam search** for feasible computation time
 * Robust against 1px drift and JPEG compression differences
 * Pure PHP implementation (GD only)
-* PHP 8.2+ compatible (no deprecated dynamic properties)
+* PHP 8.2+ compatible
 * Mapping export/import for reproducible results
 
 ---
@@ -150,7 +150,7 @@ This tool targets so-called *“16-puzzle style”* or *tile-shuffled images*.
 
 * PHP 8.2 or later
 * GD extension enabled
-* JPEG input images (PNG may require adjustments)
+* JPEG/PNG input images
 
 ---
 
