@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Tile Shuffle Image Solver (Browser)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    .panel { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
+    .panel h3 { margin: 0 0 8px 0; font-size: 14px; }
+    label { display: inline-block; margin: 6px 10px 6px 0; }
+    input[type="number"] { width: 90px; }
+    input[type="text"] { width: 220px; }
+    button { padding: 8px 10px; margin: 6px 6px 6px 0; cursor: pointer; }
+    canvas { border: 1px solid #ccc; border-radius: 8px; }
+    .small { font-size: 12px; color: #555; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    #log { white-space: pre-wrap; background: #0b0f19; color: #cfe3ff; padding: 10px; border-radius: 10px; max-height: 240px; overflow: auto; }
+    #cvOut {
+      max-width: 1024px;
+      max-height: 1024px;
+    }
+    .badge { display:inline-block; padding:2px 6px; border-radius:999px; background:#eef; font-size:12px; margin-left:6px; }
+    .hint { background:#fff7e6; border:1px solid #ffe0a3; padding:8px 10px; border-radius:10px; }
+  </style>
+</head>
+<body>
+  <h2>Tile Shuffle Image Solver (Browser)</h2>
+  <div class="hint small">
+    回転なし・欠損なしのタイルシャッフル画像を、境界一致＋ビームサーチで復元します。<br>
+    5×5が重い場合は <b>Max Size</b> を下げる（例: 1000→800）と成功率と速度が安定します。
+  </div>
+
+  <div class="row" style="margin-top:12px;">
+    <div class="panel" style="min-width:330px;">
+      <h3>1) 入力 / Input</h3>
+      <label>Image:
+        <input id="fileInput" type="file" accept="image/png,image/jpeg" />
+      </label><br>
+      <label>Max Size:
+        <input id="maxSize" type="number" min="200" max="3000" value="1200" />
+      </label>
+      <span class="small">（長辺をこのpx以下に縮小して計算）</span>
+
+      <h3 style="margin-top:14px;">2) パラメータ / Parameters</h3>
+      <div>
+        <label>rows <input id="rows" type="number" min="2" max="10" value="4"></label>
+        <label>cols <input id="cols" type="number" min="2" max="10" value="4"></label><br>
+        <label>wm <input id="wm" type="number" min="0" max="50" value="6"></label>
+        <label>hm <input id="hm" type="number" min="0" max="50" value="4"></label><br>
+        <label>band <input id="band" type="number" min="1" max="20" value="3"></label>
+        <label>step <input id="step" type="number" min="1" max="20" value="2"></label><br>
+        <label>beam <input id="beam" type="number" min="10" max="50000" value="1200"></label>
+        <label>cand <input id="cand" type="number" min="1" max="400" value="40"></label>
+      </div>
+
+      <div class="small" style="margin-top:6px;">
+        目安: 4×4 → beam 800〜2000 / cand 30〜60 / band 2〜3 / step 2<br>
+        5×5 → beam 3000〜8000 / cand 60〜120 / Max Size 800〜1200推奨
+      </div>
+
+      <h3 style="margin-top:14px;">3) 実行 / Run</h3>
+      <button id="btnSolve" disabled>Auto Solve (Beam Search)</button>
+      <button id="btnStop" disabled>Stop</button><br>
+      <button id="btnSavePng" disabled>Save PNG</button>
+      <button id="btnExportMap" disabled>Export mapping.txt</button>
+      <label class="small">Import mapping:
+        <input id="mapInput" type="file" accept=".txt,text/plain" />
+      </label>
+
+      <div class="small" style="margin-top:8px;">
+        手動修正: 復元画像のタイルを <b>2枚順にクリック</b> すると入れ替えます。
+      </div>
+
+      <h3 style="margin-top:14px;">4) Quick Adjust</h3>
+      <button id="btnRowUp">↑ Row</button>
+      <button id="btnRowDown">↓ Row</button><br>
+      <button id="btnColLeft">← Col</button>
+      <button id="btnColRight">→ Col</button>
+
+    </div>
+
+    <div class="panel">
+      <h3>Preview</h3>
+      <div class="row">
+        <div>
+          <div class="small">Input (scaled)</div>
+          <canvas id="cvIn" width="320" height="320"></canvas>
+          <div class="small" style="margin-bottom:6px;">
+            Output Zoom:
+            <input id="zoomOut" type="range" min="80" max="200" step="5" value="120">
+            <span id="zoomLabel">120%</span>
+          </div>
+        </div>
+        <div>
+          <div class="small">Output (click tiles to swap)</div>
+          <canvas id="cvOut" width="480" height="480"></canvas>
+          <div class="small mono" id="selInfo"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="flex:1; min-width:320px;">
+      <h3>Log <span class="badge" id="statusBadge">idle</span></h3>
+      <div id="log" class="mono small"></div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+  const cvIn = $("cvIn"), cxIn = cvIn.getContext("2d");
+  const cvOut = $("cvOut"), cxOut = cvOut.getContext("2d");
+
+  const zoomSlider = $("zoomOut");
+  const zoomLabel  = $("zoomLabel");
+
+  let srcCanvas = document.createElement("canvas");
+  let srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });
+
+  let tileCanvases = [];   // per input tile index (0..N-1) as canvas
+  let tileData = [];       // per tile: {w,h,data:Uint8ClampedArray}
+  let scoreR = [];         // [i][j] right->left
+  let scoreD = [];         // [i][j] bottom->top
+
+  let mapping = null;      // output position -> tile index
+  let selectedPos = null;  // for manual swap
+  let stopFlag = false;
+
+  let previewZoom = 1.2; // 120%
+  const PREVIEW_OUT_BASE = 400; // 基準サイズ（px）
+
+  function log(msg) {
+    const el = $("log");
+    el.textContent += msg + "\n";
+    el.scrollTop = el.scrollHeight;
+  }
+  function setStatus(s) {
+    $("statusBadge").textContent = s;
+  }
+  function clearLog() { $("log").textContent = ""; }
+
+  zoomSlider.addEventListener("input", () => {
+    previewZoom = parseInt(zoomSlider.value, 10) / 100;
+    zoomLabel.textContent = `${zoomSlider.value}%`;
+  
+    // すでに結果が描画されている場合は再描画
+    if (mapping && cvOut._full) {
+      const params = readParams();
+      const full = renderOutput(params, cvOut._tileW, cvOut._tileH);
+      cvOut._full = full;
+    }
+  });
+
+  function readParams() {
+    const rows = parseInt($("rows").value, 10);
+    const cols = parseInt($("cols").value, 10);
+    const wm = parseInt($("wm").value, 10);
+    const hm = parseInt($("hm").value, 10);
+    const band = parseInt($("band").value, 10);
+    const step = parseInt($("step").value, 10);
+    const beam = parseInt($("beam").value, 10);
+    const cand = parseInt($("cand").value, 10);
+    const maxSize = parseInt($("maxSize").value, 10);
+
+    return { rows, cols, wm, hm, band, step, beam, cand, maxSize };
+  }
+
+  function scaleToMax(img, maxSize) {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const scale = Math.min(1, maxSize / Math.max(w, h));
+    const nw = Math.max(1, Math.round(w * scale));
+    const nh = Math.max(1, Math.round(h * scale));
+
+    srcCanvas.width = nw;
+    srcCanvas.height = nh;
+    srcCtx.clearRect(0,0,nw,nh);
+    srcCtx.drawImage(img, 0,0,nw,nh);
+
+    // draw preview in cvIn
+    const p = fitInto(nw, nh, 320, 320);
+    cvIn.width = p.w; cvIn.height = p.h;
+    cxIn.clearRect(0,0,p.w,p.h);
+    cxIn.drawImage(srcCanvas, 0,0,nw,nh, 0,0,p.w,p.h);
+  }
+
+  function fitInto(w, h, W, H) {
+    const s = Math.min(W / w, H / h);
+    return { w: Math.max(1, Math.round(w*s)), h: Math.max(1, Math.round(h*s)) };
+  }
+
+  function buildCellBoundaries(W, H, rows, cols) {
+    const xs = new Array(cols+1);
+    const ys = new Array(rows+1);
+    for (let c=0;c<=cols;c++) xs[c] = Math.round(c * W / cols);
+    for (let r=0;r<=rows;r++) ys[r] = Math.round(r * H / rows);
+    return { xs, ys };
+  }
+
+  function cutTiles(params) {
+    const { rows, cols, wm, hm } = params;
+    const W = srcCanvas.width, H = srcCanvas.height;
+
+    const { xs, ys } = buildCellBoundaries(W, H, rows, cols);
+
+    // common tile size = min cell - wm/hm
+    let minCW = Infinity, minCH = Infinity;
+    for (let c=0;c<cols;c++) minCW = Math.min(minCW, xs[c+1]-xs[c]);
+    for (let r=0;r<rows;r++) minCH = Math.min(minCH, ys[r+1]-ys[r]);
+
+    const tileW = Math.max(1, minCW - wm);
+    const tileH = Math.max(1, minCH - hm);
+
+    tileCanvases = [];
+    tileData = [];
+
+    for (let r=0;r<rows;r++) {
+      for (let c=0;c<cols;c++) {
+        const x0 = xs[c], x1 = xs[c+1], y0 = ys[r], y1 = ys[r+1];
+        const cw = x1-x0, ch = y1-y0;
+
+        const sx = x0 + Math.floor(wm/2);
+        const sy = y0 + Math.floor(hm/2);
+        const sw = cw - wm;
+        const sh = ch - hm;
+
+        if (sw <= 0 || sh <= 0) {
+          throw new Error("wm/hm too large: tile crop becomes non-positive");
+        }
+
+        const tcv = document.createElement("canvas");
+        tcv.width = tileW;
+        tcv.height = tileH;
+        const tctx = tcv.getContext("2d", { willReadFrequently: true });
+        tctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, tileW, tileH);
+
+        const imgData = tctx.getImageData(0,0,tileW,tileH);
+        tileCanvases.push(tcv);
+        tileData.push({ w: tileW, h: tileH, data: imgData.data });
+      }
+    }
+    return { tileW, tileH, n: rows*cols };
+  }
+
+  function pixDiff(dataA, idxA, dataB, idxB) {
+    // RGBA
+    const dr = Math.abs(dataA[idxA] - dataB[idxB]);
+    const dg = Math.abs(dataA[idxA+1] - dataB[idxB+1]);
+    const db = Math.abs(dataA[idxA+2] - dataB[idxB+2]);
+    return dr + dg + db;
+  }
+
+  function buildScores(params, tileW, tileH, n) {
+    const band = Math.max(1, params.band);
+    const step = Math.max(1, params.step);
+
+    // guard: band cannot exceed tile size
+    if (band >= tileW || band >= tileH) {
+      throw new Error(`band too large. tileW=${tileW}, tileH=${tileH}, band=${band}`);
+    }
+
+    scoreR = Array.from({length:n}, () => new Float64Array(n));
+    scoreD = Array.from({length:n}, () => new Float64Array(n));
+
+    for (let i=0;i<n;i++) {
+      const A = tileData[i].data;
+      for (let j=0;j<n;j++) {
+        if (i === j) {
+          scoreR[i][j] = 1e15;
+          scoreD[i][j] = 1e15;
+          continue;
+        }
+        const B = tileData[j].data;
+
+        // right(i) -> left(j)
+        let sR = 0;
+        for (let y=0; y<tileH; y+=step) {
+          for (let k=0;k<band;k++) {
+            const xA = tileW - 1 - k;
+            const xB = k;
+            const idxA = (y*tileW + xA) * 4;
+            const idxB = (y*tileW + xB) * 4;
+            sR += pixDiff(A, idxA, B, idxB);
+          }
+        }
+
+        // bottom(i) -> top(j)
+        let sD = 0;
+        for (let x=0; x<tileW; x+=step) {
+          for (let k=0;k<band;k++) {
+            const yA = tileH - 1 - k;
+            const yB = k;
+            const idxA = (yA*tileW + x) * 4;
+            const idxB = (yB*tileW + x) * 4;
+            sD += pixDiff(A, idxA, B, idxB);
+          }
+        }
+
+        scoreR[i][j] = sR;
+        scoreD[i][j] = sD;
+      }
+    }
+  }
+
+  function usedHas(mask, t) {
+    return ((mask >> BigInt(t)) & 1n) === 1n;
+  }
+  function usedAdd(mask, t) {
+    return mask | (1n << BigInt(t));
+  }
+
+  function localCost(placed, pos, t, rows, cols) {
+    const r = Math.floor(pos / cols);
+    const c = pos % cols;
+    let cost = 0;
+    if (c > 0) {
+      const left = placed[pos - 1];
+      cost += scoreR[left][t];
+    }
+    if (r > 0) {
+      const up = placed[pos - cols];
+      cost += scoreD[up][t];
+    }
+    return cost;
+  }
+
+  async function beamSolve(params, n) {
+    const rows = params.rows, cols = params.cols;
+    const beamW = Math.max(1, params.beam);
+    const cand = Math.max(1, params.cand);
+
+    let states = [{ score: 0, used: 0n, placed: [] }];
+
+    for (let pos=0; pos<n; pos++) {
+      if (stopFlag) throw new Error("stopped");
+
+      const next = [];
+
+      for (const st of states) {
+        // candidate tiles by local cost (pick top cand)
+        const cands = [];
+        for (let t=0; t<n; t++) {
+          if (usedHas(st.used, t)) continue;
+          const lc = localCost(st.placed, pos, t, rows, cols);
+          cands.push([lc, t]);
+        }
+        cands.sort((a,b)=>a[0]-b[0]);
+        if (cands.length > cand) cands.length = cand;
+
+        for (const [lc, t] of cands) {
+          const placed = st.placed.slice();
+          placed.push(t);
+          next.push({
+            score: st.score + lc,
+            used: usedAdd(st.used, t),
+            placed
+          });
+        }
+      }
+
+      next.sort((a,b)=>a.score-b.score);
+      if (next.length > beamW) next.length = beamW;
+      states = next;
+
+      log(`pos ${pos+1}/${n}  beam=${states.length}  bestScore=${states[0].score.toFixed(2)}`);
+
+      // yield to UI
+      await new Promise(requestAnimationFrame);
+    }
+
+    return states[0].placed;
+  }
+
+  function rotateRows(delta) {
+    // delta: -1 = up, +1 = down
+    if (!mapping) return;
+    const { rows, cols } = readParams();
+    const out = new Array(mapping.length);
+
+    for (let r = 0; r < rows; r++) {
+      const nr = (r + delta + rows) % rows;
+      for (let c = 0; c < cols; c++) {
+        out[nr * cols + c] = mapping[r * cols + c];
+      }
+    }
+    mapping = out;
+  }
+
+  function rotateCols(delta) {
+    // delta: -1 = left, +1 = right
+    if (!mapping) return;
+    const { rows, cols } = readParams();
+    const out = new Array(mapping.length);
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const nc = (c + delta + cols) % cols;
+        out[r * cols + nc] = mapping[r * cols + c];
+      }
+    }
+    mapping = out;
+  }
+
+  function renderOutput(params, tileW, tileH) {
+    const rows = params.rows, cols = params.cols;
+    const outW = tileW * cols;
+    const outH = tileH * rows;
+
+    // show in cvOut (fit into 320x320 but keep click mapping separately using actual canvas scale)
+    const size = Math.round(PREVIEW_OUT_BASE * previewZoom);
+    const p = fitInto(outW, outH, size, size);
+    cvOut.width = p.w;
+    cvOut.height = p.h;
+
+    // Draw to a full-res offscreen first for saving/click-mapping
+    const full = document.createElement("canvas");
+    full.width = outW;
+    full.height = outH;
+    const fctx = full.getContext("2d");
+
+    for (let pos=0; pos<mapping.length; pos++) {
+      const t = mapping[pos];
+      const r = Math.floor(pos / cols);
+      const c = pos % cols;
+      fctx.drawImage(tileCanvases[t], c*tileW, r*tileH);
+    }
+
+    // scale preview
+    cxOut.clearRect(0,0,cvOut.width,cvOut.height);
+    cxOut.drawImage(full, 0,0,outW,outH, 0,0,cvOut.width,cvOut.height);
+
+    // selection highlight
+    if (selectedPos !== null) {
+      const sr = Math.floor(selectedPos / cols);
+      const sc = selectedPos % cols;
+      const x = sc * (cvOut.width / cols);
+      const y = sr * (cvOut.height / rows);
+      cxOut.save();
+      cxOut.strokeStyle = "red";
+      cxOut.lineWidth = 3;
+      cxOut.strokeRect(x+1, y+1, (cvOut.width/cols)-2, (cvOut.height/rows)-2);
+      cxOut.restore();
+    }
+
+    return full; // full-res canvas
+  }
+
+  function exportMappingText(params) {
+    const rows = params.rows, cols = params.cols;
+    let lines = [];
+    for (let r=0;r<rows;r++) {
+      const row = [];
+      for (let c=0;c<cols;c++) {
+        row.push(String(mapping[r*cols+c]));
+      }
+      lines.push(row.join(","));
+    }
+    return lines.join("\n") + "\n";
+  }
+
+  function downloadText(filename, text) {
+    const blob = new Blob([text], {type:"text/plain"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadCanvasPNG(filename, canvas) {
+    canvas.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    }, "image/png");
+  }
+
+  function parseMappingText(text, n) {
+    // allow comments, commas, whitespace
+    const cleaned = text
+      .split(/\r?\n/)
+      .map(line => line.replace(/#.*/, "").trim())
+      .filter(line => line.length > 0)
+      .join(" ");
+    const remember = cleaned.split(/[,\s]+/).filter(Boolean).map(v => parseInt(v,10));
+    if (remember.length !== n) throw new Error(`mapping length mismatch: ${remember.length} != ${n}`);
+    // validate permutation
+    const sorted = remember.slice().sort((a,b)=>a-b);
+    for (let i=0;i<n;i++) if (sorted[i] !== i) throw new Error("mapping must be permutation 0..n-1");
+    return remember;
+  }
+
+  async function handleSolve() {
+    try {
+      stopFlag = false;
+      $("btnStop").disabled = false;
+      $("btnSolve").disabled = true;
+      setStatus("running");
+      clearLog();
+
+      const params = readParams();
+      if (!srcCanvas.width) throw new Error("no image loaded");
+
+      log("cut tiles...");
+      const { tileW, tileH, n } = cutTiles(params);
+      log(`tiles: ${n}, tileW=${tileW}, tileH=${tileH}`);
+
+      log("build edge scores...");
+      buildScores(params, tileW, tileH, n);
+      log("scores built.");
+
+      log("beam search...");
+      mapping = await beamSolve(params, n);
+
+      selectedPos = null;
+      $("selInfo").textContent = "";
+      const full = renderOutput(params, tileW, tileH);
+      $("btnSavePng").disabled = false;
+      $("btnExportMap").disabled = false;
+
+      // keep full canvas for saving
+      cvOut._full = full;
+      cvOut._tileW = tileW;
+      cvOut._tileH = tileH;
+
+      setStatus("done");
+      log("done.");
+    } catch (e) {
+      setStatus("error");
+      log("ERROR: " + (e && e.message ? e.message : String(e)));
+    } finally {
+      $("btnStop").disabled = true;
+      $("btnSolve").disabled = false;
+    }
+  }
+
+  function handleStop() {
+    stopFlag = true;
+    log("stop requested...");
+  }
+
+  function enableButtonsOnImageLoaded() {
+    $("btnSolve").disabled = false;
+  }
+
+  // Manual swap by clicking output canvas
+  cvOut.addEventListener("click", (ev) => {
+    if (!mapping || !cvOut._full) return;
+
+    const params = readParams();
+    const rows = params.rows, cols = params.cols;
+
+    const rect = cvOut.getBoundingClientRect();
+    const x = (ev.clientX - rect.left) / rect.width * cvOut.width;
+    const y = (ev.clientY - rect.top) / rect.height * cvOut.height;
+
+    const c = Math.floor(x / (cvOut.width / cols));
+    const r = Math.floor(y / (cvOut.height / rows));
+    const pos = r * cols + c;
+    if (pos < 0 || pos >= mapping.length) return;
+
+    if (selectedPos === null) {
+      selectedPos = pos;
+      $("selInfo").textContent = `selected: pos ${pos} (tile ${mapping[pos]})`;
+    } else {
+      const a = selectedPos, b = pos;
+      if (a !== b) {
+        const tmp = mapping[a];
+        mapping[a] = mapping[b];
+        mapping[b] = tmp;
+        $("selInfo").textContent = `swapped: pos ${a} <-> ${b}`;
+      } else {
+        $("selInfo").textContent = `selected cleared`;
+      }
+      selectedPos = null;
+    }
+
+    // re-render
+    const full = renderOutput(params, cvOut._tileW, cvOut._tileH);
+    cvOut._full = full;
+  });
+
+  // File input
+  $("fileInput").addEventListener("change", async (ev) => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+
+    clearLog();
+    setStatus("loading");
+    $("btnSolve").disabled = true;
+
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const params = readParams();
+        scaleToMax(img, params.maxSize);
+
+        // reset output
+        cxOut.clearRect(0,0,cvOut.width,cvOut.height);
+        mapping = null;
+        selectedPos = null;
+        $("btnSavePng").disabled = true;
+        $("btnExportMap").disabled = true;
+        cvOut._full = null;
+
+        enableButtonsOnImageLoaded();
+        setStatus("ready");
+        log(`loaded: ${file.name} (${img.naturalWidth}x${img.naturalHeight}) scaled to ${srcCanvas.width}x${srcCanvas.height}`);
+        zoomLabel.textContent = `${zoomSlider.value}%`;
+      } catch (e) {
+        setStatus("error");
+        log("ERROR: " + e.message);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    img.onerror = () => {
+      setStatus("error");
+      log("failed to load image.");
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  });
+
+  $("btnSolve").addEventListener("click", handleSolve);
+  $("btnStop").addEventListener("click", handleStop);
+
+  cvOut.addEventListener("dblclick", () => {
+    zoomSlider.value = 100;
+    zoomSlider.dispatchEvent(new Event("input"));
+  });
+
+  $("btnRowUp").addEventListener("click", () => {
+    rotateRows(-1);
+    const p = readParams();
+    const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
+    cvOut._full = full;
+  });
+  
+  $("btnRowDown").addEventListener("click", () => {
+    rotateRows(1);
+    const p = readParams();
+    const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
+    cvOut._full = full;
+  });
+  
+  $("btnColLeft").addEventListener("click", () => {
+    rotateCols(-1);
+    const p = readParams();
+    const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
+    cvOut._full = full;
+  });
+  
+  $("btnColRight").addEventListener("click", () => {
+    rotateCols(1);
+    const p = readParams();
+    const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
+    cvOut._full = full;
+  });
+
+  $("btnSavePng").addEventListener("click", () => {
+    if (!cvOut._full) return;
+    downloadCanvasPNG("solved.png", cvOut._full);
+  });
+
+  $("btnExportMap").addEventListener("click", () => {
+    if (!mapping) return;
+    const params = readParams();
+    const text = exportMappingText(params);
+    downloadText("mapping.txt", text);
+  });
+
+  $("mapInput").addEventListener("change", async (ev) => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    try {
+      if (!srcCanvas.width) throw new Error("load image first");
+      const params = readParams();
+
+      // need tiles cut to render mapping
+      const { tileW, tileH, n } = cutTiles(params);
+      const text = await file.text();
+      mapping = parseMappingText(text, n);
+
+      selectedPos = null;
+      $("selInfo").textContent = "";
+      const full = renderOutput(params, tileW, tileH);
+      cvOut._full = full;
+      cvOut._tileW = tileW;
+      cvOut._tileH = tileH;
+
+      $("btnSavePng").disabled = false;
+      $("btnExportMap").disabled = false;
+
+      setStatus("map loaded");
+      log(`mapping loaded: ${file.name}`);
+    } catch (e) {
+      setStatus("error");
+      log("ERROR: " + (e && e.message ? e.message : String(e)));
+    }
+  });
+
+  // init
+  setStatus("idle");
+  log("ready. load an image to start.");
+})();
+</script>
+</body>
+</html>
