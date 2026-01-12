@@ -112,6 +112,8 @@ php solve.php shuffled.jpg \
 各自の利用目的・対象コンテンツの利用規約を遵守してください。
 本リポジトリのコード自体のライセンスは、リポジトリ内の LICENSE を参照してください。
 
+---
+
 ### WebApp
 
 [Trt it.](https://id-fa.github.io/tile-shuffle-image-solver/webapp/)
@@ -215,3 +217,8 @@ See the LICENSE file in this repository for code licensing details.
 
 ---
 
+### WebApp
+
+[Trt it.](https://id-fa.github.io/tile-shuffle-image-solver/webapp/)
+
+---
