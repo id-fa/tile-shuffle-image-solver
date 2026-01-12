@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Tile Shuffle Image Solver (Web)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,sans-serif; line-height: 1.6; margin: 24px; max-width: 980px; }
+    h1,h2,h3 { line-height: 1.25; }
+    code, pre { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    pre { padding: 12px; border-radius: 10px; overflow: auto; background: rgba(127,127,127,.12); }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 18px; }
+    @media (min-width: 900px){ .grid { grid-template-columns: 1fr 1fr; } }
+    .card { border: 1px solid rgba(127,127,127,.35); border-radius: 14px; padding: 16px; }
+    .small { font-size: 0.95rem; opacity: .9; }
+    .muted { opacity: .75; }
+    .kbd { padding: 1px 6px; border: 1px solid rgba(127,127,127,.45); border-bottom-width: 2px; border-radius: 6px; font-family: ui-monospace,monospace; }
+    ul { margin-top: 8px; }
+    table { border-collapse: collapse; width: 100%; }
+    th,td { border: 1px solid rgba(127,127,127,.35); padding: 8px; vertical-align: top; }
+    th { text-align: left; background: rgba(127,127,127,.12); }
+    a { color: inherit; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: rgba(100,140,255,.18); border: 1px solid rgba(100,140,255,.35); }
+    .warn { background: rgba(255,196,0,.15); border: 1px solid rgba(255,196,0,.35); padding: 10px 12px; border-radius: 12px; }
+  </style>
+</head>
+<body>
+  <h1><a href="./webapp/" target="_blank">Tile Shuffle Image Solver (Web)</a></h1>
+  <p class="small muted">
+    A browser-based tool to reconstruct grid-tiled images whose tiles were shuffled (no rotation), using edge similarity + beam search.
+    / タイル分割された画像（回転なし）のシャッフルを、境界一致＋ビームサーチで復元するブラウザアプリです。
+  </p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>日本語</h2>
+
+      <h3>概要</h3>
+      <p>
+        本Webアプリは、画像を <b>rows×cols</b> のグリッドとして扱い、タイルの順序だけが入れ替わった画像を
+        <b>境界の画素差分</b>に基づいて推定し、<b>ビームサーチ</b>で自動復元します（タイル回転は扱いません）。
+      </p>
+
+      <h3>主な機能</h3>
+      <ul>
+        <li>画像読み込み（PNG/JPEG）</li>
+        <li>パラメータ設定（rows/cols/wm/hm/band/step/beam/cand ほか）</li>
+        <li>ビームサーチによる自動配置（完全シャッフル想定）</li>
+        <li>手動修正：タイルを<strong>2枚順にクリック</strong>で入れ替え（swap）</li>
+        <li>行・列の循環シフト（ループスクロール）で上下左右のズレを一発補正</li>
+        <li>Preview Zoom（スライダー）で出力プレビューを拡大縮小</li>
+        <li>復元画像をPNG保存</li>
+        <li>mapping.txt のエクスポート／インポート</li>
+      </ul>
+
+      <h3>クイックスタート</h3>
+      <ol>
+        <li><b>Image</b> からシャッフル画像を読み込む</li>
+        <li>必要に応じて <b>rows/cols</b> と <b>wm/hm</b> を設定</li>
+        <li><b>Auto Solve</b> を実行</li>
+        <li>崩れている場合：
+          <ul>
+            <li>行/列の循環シフト（↑↓←→ボタン）で全体ズレを補正</li>
+            <li>残りはタイルを2枚クリックして入れ替え</li>
+          </ul>
+        </li>
+        <li><b>Save PNG</b> で保存（必要なら mapping.txt も保存）</li>
+      </ol>
+
+      <h3>パラメータの目安</h3>
+      <table>
+        <tr><th>パラメータ</th><th>推奨範囲</th><th>説明</th></tr>
+        <tr><td><code>rows</code>/<code>cols</code></td><td>3〜5</td><td>5×5以上は計算量が急増します</td></tr>
+        <tr><td><code>Max Size</code></td><td>800〜1200</td><td>長辺を縮小して計算（速度/安定性に効きます）</td></tr>
+        <tr><td><code>beam</code></td><td>4×4: 800〜2000<br>5×5: 3000〜8000</td><td>大きいほど精度↑・時間↑</td></tr>
+        <tr><td><code>cand</code></td><td>4×4: 30〜60<br>5×5: 60〜120</td><td>各状態で試す候補タイル数</td></tr>
+        <tr><td><code>band</code></td><td><b>2〜3</b>（最大でも4程度）</td><td>境界比較幅。大きすぎると範囲外になりやすい</td></tr>
+        <tr><td><code>step</code></td><td>2〜3</td><td>比較の間引き。1は精密だが重い</td></tr>
+        <tr><td><code>wm</code>/<code>hm</code></td><td>0〜10</td><td>セル内トリム（境界ノイズ対策）</td></tr>
+      </table>
+
+      <div class="warn">
+        <b>band の注意</b><br>
+        <code>band</code> はタイル境界の比較幅（px）です。タイルが小さい状態で大きな値にすると、境界参照が範囲外になり
+        エラーや精度低下の原因になります。まずは <b>2</b> または <b>3</b> を推奨します。
+      </div>
+
+      <h3>制限事項</h3>
+      <ul>
+        <li>タイルの回転（90°/180°）は非対応</li>
+        <li>タイル欠損がある画像は非対応</li>
+        <li>均一な色・模様が多い画像では難しくなる場合があります</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>English</h2>
+
+      <h3>Overview</h3>
+      <p>
+        This web app reconstructs <b>grid-tiled</b> images whose tiles have been <b>shuffled in order</b> (no rotation),
+        using <b>pixel edge similarity</b> and <b>beam search</b>.
+      </p>
+
+      <h3>Key Features</h3>
+      <ul>
+        <li>Load PNG/JPEG images</li>
+        <li>Adjust parameters (rows/cols/wm/hm/band/step/beam/cand, etc.)</li>
+        <li>Automatic placement via beam search (fully shuffled tiles)</li>
+        <li>Manual fix: click <strong>two tiles</strong> to swap</li>
+        <li>Row/column cyclic shift (loop scroll) to quickly fix global offsets</li>
+        <li>Preview Zoom slider (output preview scaling)</li>
+        <li>Save reconstructed image as PNG</li>
+        <li>Export/Import <code>mapping.txt</code></li>
+      </ul>
+
+      <h3>Quick Start</h3>
+      <ol>
+        <li>Load a shuffled image via <b>Image</b></li>
+        <li>Set <b>rows/cols</b> and optionally <b>wm/hm</b></li>
+        <li>Run <b>Auto Solve</b></li>
+        <li>If the result is close but offset:
+          <ul>
+            <li>Use row/column cyclic shift buttons (↑↓←→)</li>
+            <li>Use two-click swaps for remaining mistakes</li>
+          </ul>
+        </li>
+        <li>Save via <b>Save PNG</b> (optionally export mapping)</li>
+      </ol>
+
+      <h3>Practical Parameter Ranges</h3>
+      <table>
+        <tr><th>Parameter</th><th>Recommended Range</th><th>Notes</th></tr>
+        <tr><td><code>rows</code>/<code>cols</code></td><td>3–5</td><td>Search cost grows rapidly beyond 5×5</td></tr>
+        <tr><td><code>Max Size</code></td><td>800–1200</td><td>Downscale longest side to improve speed/stability</td></tr>
+        <tr><td><code>beam</code></td><td>4×4: 800–2000<br>5×5: 3000–8000</td><td>Bigger beam improves accuracy but uses more time</td></tr>
+        <tr><td><code>cand</code></td><td>4×4: 30–60<br>5×5: 60–120</td><td>Candidate tiles expanded per state</td></tr>
+        <tr><td><code>band</code></td><td><b>2–3</b> (avoid &gt;4)</td><td>Edge comparison thickness in pixels</td></tr>
+        <tr><td><code>step</code></td><td>2–3</td><td>Sampling step. 1 is precise but slower</td></tr>
+        <tr><td><code>wm</code>/<code>hm</code></td><td>0–10</td><td>Inner trimming for boundary noise reduction</td></tr>
+      </table>
+
+      <div class="warn">
+        <b>About <code>band</code></b><br>
+        <code>band</code> controls edge thickness (pixels). Too large values can cause out-of-bounds edge reads or
+        reduce accuracy due to over-averaging. Start with <b>2</b> or <b>3</b>.
+      </div>
+
+      <h3>Limitations</h3>
+      <ul>
+        <li>Tile rotation (90°/180°) is not supported</li>
+        <li>Missing tiles are not supported</li>
+        <li>Highly uniform images may be ambiguous</li>
+      </ul>
+    </section>
+  </div>
+
+  <hr style="margin:22px 0; opacity:.35;" />
+
+  <section class="card">
+    <h2>操作メモ / Interaction Notes</h2>
+    <ul>
+      <li><b>Manual swap</b>：出力プレビューのタイルを <span class="kbd">click</span> 2回（2枚）で入れ替え / Click two tiles to swap.</li>
+      <li><b>Row/Col shift</b>：行・列を循環シフトして上下左右のズレを補正 / Cyclic shift fixes global offsets quickly.</li>
+      <li><b>Zoom</b>：Zoomスライダーで出力プレビューの見やすさを調整 / Use zoom slider for comfortable editing.</li>
+      <li><b>mapping.txt</b>：復元結果を保存し、同条件で再利用可能 / Export and reuse reconstruction mapping.</li>
+    </ul>
+  </section>
+
+  <section class="card" style="margin-top:18px;">
+    <h2>License / ライセンス</h2>
+    <p class="small">
+      This project is released under the MIT License. / 本プロジェクトは MIT License です。
+    </p>
+  </section>
+</body>
+</html>
