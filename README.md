@@ -15,7 +15,9 @@
 いわゆる「16(15)パズル風」「タイルシャッフル形式」の画像に対して、  
 **境界の画素情報を用いた探索アルゴリズム** により、元画像を再構築します。
 
-![Example](docs/sample1_(OK).png)
+|Target|Result|
+|---|---|
+|![Target](docs/sample1_(OK).png)|![Result](docs/sample1_(OK)_solved.png)|
 
 ---
 
@@ -109,6 +111,10 @@ php solve.php shuffled.jpg \
 
 各自の利用目的・対象コンテンツの利用規約を遵守してください。
 本リポジトリのコード自体のライセンスは、リポジトリ内の LICENSE を参照してください。
+
+### WebApp
+
+[Trt it.](https://id-fa.github.io/tile-shuffle-image-solver/webapp/)
 
 ---
 
