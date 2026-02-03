@@ -118,6 +118,11 @@ php solve.php shuffled.jpg \
 
 [Trt it.](https://id-fa.github.io/tile-shuffle-image-solver/webapp/)
 
+### 関連
+
+[タイル状にシャッフルされた画像を元に戻すツール - ふぁメモ](https://fa.hatenadiary.jp/entry/20260111/1768130865)
+
+
 ---
 
 ## English
