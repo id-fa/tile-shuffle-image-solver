@@ -23,6 +23,8 @@
     }
     .badge { display:inline-block; padding:2px 6px; border-radius:999px; background:#eef; font-size:12px; margin-left:6px; }
     .hint { background:#fff7e6; border:1px solid #ffe0a3; padding:8px 10px; border-radius:10px; }
+    details.adv { margin-top: 6px; }
+    details.adv summary { cursor: pointer; font-size: 12px; color: #555; }
   </style>
 <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-E05P3RLDS9"></script>
@@ -37,8 +39,8 @@
 <body>
   <h2>Tile Shuffle Image Solver (Browser)</h2>
   <div class="hint small">
-    回転なし・欠損なしのタイルシャッフル画像を、境界一致＋ビームサーチで復元します。<br>
-    5×5が重い場合は <b>Max Size</b> を下げる（例: 1000→800）と成功率と速度が安定します。
+    回転なし・欠損なしのタイルシャッフル画像を、境界の勾配一致（MGC）＋ビームサーチ＋局所探索で復元します。<br>
+    計算は Web Worker 上で行うため、実行中も画面は固まりません。5×5 以上でも通常は既定値のままで動きます。
   </div>
 
   <div class="row" style="margin-top:12px;">
@@ -58,19 +60,31 @@
         <label>cols <input id="cols" type="number" min="2" max="10" value="4"></label><br>
         <label>wm <input id="wm" type="number" min="0" max="50" value="6"></label>
         <label>hm <input id="hm" type="number" min="0" max="50" value="4"></label><br>
-        <label>band <input id="band" type="number" min="1" max="20" value="3"></label>
-        <label>step <input id="step" type="number" min="1" max="20" value="2"></label><br>
         <label>beam <input id="beam" type="number" min="10" max="50000" value="1200"></label>
         <label>cand <input id="cand" type="number" min="1" max="400" value="40"></label>
       </div>
+      <details class="adv">
+        <summary>詳細設定 / Advanced</summary>
+        <label>score
+          <select id="score">
+            <option value="mgc" selected>mgc (gradient)</option>
+            <option value="raw">raw (L1 diff)</option>
+          </select>
+        </label>
+        <label><input id="norm" type="checkbox" checked> normalize</label><br>
+        <label>orders <input id="orders" type="number" min="1" max="4" value="4"></label>
+        <label><input id="refine" type="checkbox" checked> refine</label><br>
+        <label>band <input id="band" type="number" min="1" max="20" value="3"></label>
+        <label>step <input id="step" type="number" min="1" max="20" value="1"></label>
+      </details>
 
       <div class="small" style="margin-top:6px;">
-        目安: 4×4 → beam 800〜2000 / cand 30〜60 / band 2〜3 / step 2<br>
-        5×5 → beam 3000〜8000 / cand 60〜120 / Max Size 800〜1200推奨
+        目安: 7×7 までは既定値（beam 1200 / cand 40）のままで可。誤りが残る場合のみ beam を 3000〜5000 に。<br>
+        境界がきれいな画像は wm/hm を 0 に。band は raw スコア時のみ有効。
       </div>
 
       <h3 style="margin-top:14px;">3) 実行 / Run</h3>
-      <button id="btnSolve" disabled>Auto Solve (Beam Search)</button>
+      <button id="btnSolve" disabled>Auto Solve</button>
       <button id="btnStop" disabled>Stop</button><br>
       <button id="btnSavePng" disabled>Save PNG</button>
       <button id="btnExportMap" disabled>Export mapping.txt</button>
@@ -120,6 +134,326 @@
     <h3>Written by</h3>
     <div class="mono small"><a href="https://fa.hatenadiary.jp/entry/20260111/1768130865">ふぁメモ</a></div>
   </div>
+
+<!-- ============================================================
+     Solver core (runs inside a Web Worker, built from this text)
+     ============================================================ -->
+<script id="solverWorkerSrc" type="text/plain">
+'use strict';
+const INF = 1e15;
+const MGC_EPS = 1.0;
+
+let rows = 0, cols = 0, n = 0;
+let costR = null, costD = null;   // Float64Array n*n  [left*n+right] / [top*n+bottom]
+
+function post(type, o) { self.postMessage(Object.assign({ type }, o || {})); }
+function log(msg) { post('log', { msg }); }
+
+/* ---------- scoring ---------- */
+
+// mean / variance (per channel) of the outward gradient s0 - s1 along one side
+function gradStats(s0, s1, m) {
+  const mu = [0, 0, 0], vr = [0, 0, 0];
+  for (let y = 0; y < m; y++) for (let c = 0; c < 3; c++) mu[c] += s0[y * 3 + c] - s1[y * 3 + c];
+  for (let c = 0; c < 3; c++) mu[c] /= m;
+  for (let y = 0; y < m; y++) for (let c = 0; c < 3; c++) {
+    const d = s0[y * 3 + c] - s1[y * 3 + c] - mu[c];
+    vr[c] += d * d;
+  }
+  for (let c = 0; c < 3; c++) vr[c] = vr[c] / m + MGC_EPS;
+  return [mu, vr];
+}
+
+// symmetric Mahalanobis gradient compatibility between side A (a0 = outermost line) and side B
+function mgcPair(a0, statA, b0, statB, m) {
+  const muA = statA[0], varA = statA[1], muB = statB[0], varB = statB[1];
+  let d = 0;
+  for (let y = 0; y < m; y++) {
+    const o = y * 3;
+    for (let c = 0; c < 3; c++) {
+      const g = b0[o + c] - a0[o + c];   // gradient crossing the seam A -> B
+      let e = g - muA[c];  d += e * e / varA[c];
+      e = -g - muB[c];     d += e * e / varB[c];
+    }
+  }
+  return d;
+}
+
+function rawPair(A, B, m) {
+  let d = 0;
+  for (let k = 0; k < A.length; k++) {
+    const a = A[k], b = B[k];
+    for (let i = 0; i < m * 3; i++) d += Math.abs(a[i] - b[i]);
+  }
+  return d;
+}
+
+// divide each dissimilarity by the second-best value in its row and column
+function normalize(D) {
+  const rowRef = new Float64Array(n), colRef = new Float64Array(n);
+  const v = [];
+  for (let i = 0; i < n; i++) {
+    v.length = 0;
+    for (let j = 0; j < n; j++) if (j !== i) v.push(D[i * n + j]);
+    v.sort((a, b) => a - b);
+    rowRef[i] = (v.length > 1 ? v[1] : (v[0] ?? 1)) + 1e-9;
+  }
+  for (let j = 0; j < n; j++) {
+    v.length = 0;
+    for (let i = 0; i < n; i++) if (i !== j) v.push(D[i * n + j]);
+    v.sort((a, b) => a - b);
+    colRef[j] = (v.length > 1 ? v[1] : (v[0] ?? 1)) + 1e-9;
+  }
+  const C = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    C[i * n + j] = (i === j) ? INF : 0.5 * (D[i * n + j] / rowRef[i] + D[i * n + j] / colRef[j]);
+  }
+  return C;
+}
+
+// edges: { L:[line0,line1,...], R:[...], T:[...], B:[...] } each line = Float32Array(n*m*3)
+function buildTables(edges, mH, mV, params) {
+  const rawR = new Float64Array(n * n), rawD = new Float64Array(n * n);
+  const sub = (line, i, m) => line.subarray(i * m * 3, (i + 1) * m * 3);
+
+  if (params.score === 'raw') {
+    for (let i = 0; i < n; i++) {
+      const Ri = edges.R.map(l => sub(l, i, mH)), Bi = edges.B.map(l => sub(l, i, mV));
+      for (let j = 0; j < n; j++) {
+        if (i === j) { rawR[i * n + j] = INF; rawD[i * n + j] = INF; continue; }
+        rawR[i * n + j] = rawPair(Ri, edges.L.map(l => sub(l, j, mH)), mH);
+        rawD[i * n + j] = rawPair(Bi, edges.T.map(l => sub(l, j, mV)), mV);
+      }
+    }
+  } else {
+    const st = [];
+    for (let i = 0; i < n; i++) {
+      st.push({
+        L: gradStats(sub(edges.L[0], i, mH), sub(edges.L[1], i, mH), mH),
+        R: gradStats(sub(edges.R[0], i, mH), sub(edges.R[1], i, mH), mH),
+        T: gradStats(sub(edges.T[0], i, mV), sub(edges.T[1], i, mV), mV),
+        B: gradStats(sub(edges.B[0], i, mV), sub(edges.B[1], i, mV), mV),
+      });
+    }
+    for (let i = 0; i < n; i++) {
+      const Ri = sub(edges.R[0], i, mH), Bi = sub(edges.B[0], i, mV);
+      for (let j = 0; j < n; j++) {
+        if (i === j) { rawR[i * n + j] = INF; rawD[i * n + j] = INF; continue; }
+        rawR[i * n + j] = mgcPair(Ri, st[i].R, sub(edges.L[0], j, mH), st[j].L, mH);
+        rawD[i * n + j] = mgcPair(Bi, st[i].B, sub(edges.T[0], j, mV), st[j].T, mV);
+      }
+    }
+  }
+  costR = params.norm ? normalize(rawR) : rawR;
+  costD = params.norm ? normalize(rawD) : rawD;
+}
+
+/* ---------- objective ---------- */
+
+// neighbours of a position: [[pos, dir], ...]  dir 0=right 1=left 2=down 3=up
+function neighbors(p) {
+  const r = Math.floor(p / cols), c = p % cols, nb = [];
+  if (c + 1 < cols) nb.push([p + 1, 0]);
+  if (c > 0) nb.push([p - 1, 1]);
+  if (r + 1 < rows) nb.push([p + cols, 2]);
+  if (r > 0) nb.push([p - cols, 3]);
+  return nb;
+}
+
+// cost of tile t having tile u as its neighbour in direction dir
+function pairCost(t, u, dir) {
+  switch (dir) {
+    case 0: return costR[t * n + u];
+    case 1: return costR[u * n + t];
+    case 2: return costD[t * n + u];
+    default: return costD[u * n + t];
+  }
+}
+
+function totalCost(map) {
+  let c = 0;
+  for (let p = 0; p < n; p++) {
+    if (p % cols + 1 < cols) c += costR[map[p] * n + map[p + 1]];
+    if (p + cols < n) c += costD[map[p] * n + map[p + cols]];
+  }
+  return c;
+}
+
+/* ---------- beam search ---------- */
+
+function traversalOrders(k) {
+  const rm = [], cm = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) rm.push(r * cols + c);
+  for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++) cm.push(r * cols + c);
+  return [rm, rm.slice().reverse(), cm, cm.slice().reverse()].slice(0, Math.max(1, Math.min(4, k)));
+}
+
+// beam search filling positions in `order`; states sharing the used set and
+// the frontier tiles are merged.  used-set = two 32-bit masks (n <= 64).
+function beamSearch(order, beam, cand, label) {
+  const placedSet = new Uint8Array(n), stepNb = [], stepFr = [];
+  for (let s = 0; s < n; s++) {
+    const p = order[s];
+    stepNb.push(neighbors(p).filter(([q]) => placedSet[q]));
+    placedSet[p] = 1;
+    const fr = [];
+    for (let q = 0; q < n; q++) if (placedSet[q] && neighbors(q).some(([x]) => !placedSet[x])) fr.push(q);
+    stepFr.push(fr);
+  }
+
+  let states = [{ score: 0, lo: 0, hi: 0, placed: new Uint8Array(n).fill(255) }];
+  const cost = new Float64Array(n);
+  const idx = [];
+
+  for (let s = 0; s < n; s++) {
+    const p = order[s], nb = stepNb[s], fr = stepFr[s];
+    const next = new Map();   // key -> [score, parent index, tile]
+
+    for (let si = 0; si < states.length; si++) {
+      const st = states[si], pl = st.placed;
+      idx.length = 0;
+      for (let t = 0; t < n; t++) {
+        const used = t < 32 ? (st.lo >>> t) & 1 : (st.hi >>> (t - 32)) & 1;
+        if (used) continue;
+        let c = 0;
+        for (let k = 0; k < nb.length; k++) c += pairCost(t, pl[nb[k][0]], nb[k][1]);
+        cost[t] = c;
+        idx.push(t);
+      }
+      idx.sort((a, b) => cost[a] - cost[b]);
+      const lim = Math.min(cand, idx.length);
+      for (let k = 0; k < lim; k++) {
+        const t = idx[k];
+        const sc = st.score + cost[t];
+        const lo = t < 32 ? (st.lo | (1 << t)) >>> 0 : st.lo;
+        const hi = t < 32 ? st.hi : (st.hi | (1 << (t - 32))) >>> 0;
+        let key = lo + ':' + hi + '|';
+        for (let f = 0; f < fr.length; f++) key += (fr[f] === p ? t : pl[fr[f]]) + ',';
+        const prev = next.get(key);
+        if (!prev || prev[0] > sc) next.set(key, [sc, si, t]);
+      }
+    }
+
+    let arr = Array.from(next.values());
+    arr.sort((a, b) => a[0] - b[0]);
+    if (arr.length > beam) arr.length = beam;
+
+    const nw = new Array(arr.length);
+    for (let k = 0; k < arr.length; k++) {
+      const [sc, si, t] = arr[k];
+      const par = states[si];
+      const pl = par.placed.slice(); pl[p] = t;
+      nw[k] = {
+        score: sc,
+        lo: t < 32 ? (par.lo | (1 << t)) >>> 0 : par.lo,
+        hi: t < 32 ? par.hi : (par.hi | (1 << (t - 32))) >>> 0,
+        placed: pl,
+      };
+    }
+    states = nw;
+    if (s === n - 1 || (s + 1) % Math.max(1, Math.floor(n / 4)) === 0) {
+      log(`  ${label} step ${s + 1}/${n}  states=${states.length}  best=${states[0].score.toFixed(3)}`);
+    }
+  }
+  return Array.from(states[0].placed);
+}
+
+/* ---------- local refinement ---------- */
+
+function shifted(map, dr, dc) {
+  const out = new Array(n);
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    out[((r + dr) % rows) * cols + (c + dc) % cols] = map[r * cols + c];
+  }
+  return out;
+}
+function rowShifted(map, r, dc) {
+  const out = map.slice();
+  for (let c = 0; c < cols; c++) out[r * cols + (c + dc) % cols] = map[r * cols + c];
+  return out;
+}
+function colShifted(map, c, dr) {
+  const out = map.slice();
+  for (let r = 0; r < rows; r++) out[((r + dr) % rows) * cols + c] = map[r * cols + c];
+  return out;
+}
+// sum of seams touching positions a or b (each seam counted once)
+function localCost(map, a, b) {
+  let c = 0;
+  const seen = new Set();
+  for (const p of [a, b]) for (const [q, dir] of neighbors(p)) {
+    const k = Math.min(p, q) * n + Math.max(p, q);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    c += pairCost(map[p], map[q], dir);
+  }
+  return c;
+}
+
+function refine(map) {
+  let best = totalCost(map);
+  const eps = 1e-9;
+  let improved;
+  do {
+    improved = false;
+    for (let dr = 0; dr < rows; dr++) for (let dc = 0; dc < cols; dc++) {
+      if (dr === 0 && dc === 0) continue;
+      const m = shifted(map, dr, dc), c = totalCost(m);
+      if (c < best - eps) { map = m; best = c; improved = true; }
+    }
+    for (let r = 0; r < rows; r++) for (let dc = 1; dc < cols; dc++) {
+      const m = rowShifted(map, r, dc), c = totalCost(m);
+      if (c < best - eps) { map = m; best = c; improved = true; }
+    }
+    for (let c0 = 0; c0 < cols; c0++) for (let dr = 1; dr < rows; dr++) {
+      const m = colShifted(map, c0, dr), c = totalCost(m);
+      if (c < best - eps) { map = m; best = c; improved = true; }
+    }
+    for (let a = 0; a < n; a++) for (let b = a + 1; b < n; b++) {
+      const before = localCost(map, a, b);
+      const tmp = map[a]; map[a] = map[b]; map[b] = tmp;
+      const after = localCost(map, a, b);
+      if (after < before - eps) { best += after - before; improved = true; }
+      else { map[b] = map[a]; map[a] = tmp; }
+    }
+  } while (improved);
+  return map;
+}
+
+/* ---------- entry ---------- */
+
+self.onmessage = (ev) => {
+  const d = ev.data;
+  if (d.type !== 'solve') return;
+  try {
+    rows = d.rows; cols = d.cols; n = rows * cols;
+    const t0 = performance.now();
+    buildTables(d.edges, d.mH, d.mV, d.params);
+    log(`tables built (${(performance.now() - t0).toFixed(0)} ms)`);
+
+    let bestMap = null, bestCost = Infinity;
+    const orders = traversalOrders(d.params.orders);
+    for (let k = 0; k < orders.length; k++) {
+      const t1 = performance.now();
+      let map = beamSearch(orders[k], d.params.beam, d.params.cand, `order ${k + 1}`);
+      let c = totalCost(map);
+      if (d.params.refine) {
+        map = refine(map);
+        const c2 = totalCost(map);
+        log(`order ${k + 1}: beam=${c.toFixed(3)} refined=${c2.toFixed(3)} (${(performance.now() - t1).toFixed(0)} ms)`);
+        c = c2;
+      } else {
+        log(`order ${k + 1}: beam=${c.toFixed(3)} (${(performance.now() - t1).toFixed(0)} ms)`);
+      }
+      if (c < bestCost) { bestCost = c; bestMap = map; }
+    }
+    post('done', { mapping: bestMap, cost: bestCost, ms: performance.now() - t0 });
+  } catch (e) {
+    post('error', { msg: e && e.message ? e.message : String(e) });
+  }
+};
+</script>
+
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -135,15 +469,18 @@
 
   let tileCanvases = [];   // per input tile index (0..N-1) as canvas
   let tileData = [];       // per tile: {w,h,data:Uint8ClampedArray}
-  let scoreR = [];         // [i][j] right->left
-  let scoreD = [];         // [i][j] bottom->top
 
   let mapping = null;      // output position -> tile index
   let selectedPos = null;  // for manual swap
-  let stopFlag = false;
+  let worker = null;
 
   let previewZoom = 1.2; // 120%
   const PREVIEW_OUT_BASE = 400; // 基準サイズ（px）
+  const MAX_TILES = 64;
+
+  const workerURL = URL.createObjectURL(
+    new Blob([$("solverWorkerSrc").textContent], { type: "text/javascript" })
+  );
 
   function log(msg) {
     const el = $("log");
@@ -158,7 +495,7 @@
   zoomSlider.addEventListener("input", () => {
     previewZoom = parseInt(zoomSlider.value, 10) / 100;
     zoomLabel.textContent = `${zoomSlider.value}%`;
-  
+
     // すでに結果が描画されている場合は再描画
     if (mapping && cvOut._full) {
       const params = readParams();
@@ -177,8 +514,12 @@
     const beam = parseInt($("beam").value, 10);
     const cand = parseInt($("cand").value, 10);
     const maxSize = parseInt($("maxSize").value, 10);
+    const score = $("score").value;
+    const norm = $("norm").checked;
+    const orders = parseInt($("orders").value, 10);
+    const refine = $("refine").checked;
 
-    return { rows, cols, wm, hm, band, step, beam, cand, maxSize };
+    return { rows, cols, wm, hm, band, step, beam, cand, maxSize, score, norm, orders, refine };
   }
 
   function scaleToMax(img, maxSize) {
@@ -215,6 +556,8 @@
   function cutTiles(params) {
     const { rows, cols, wm, hm } = params;
     const W = srcCanvas.width, H = srcCanvas.height;
+
+    if (rows * cols > MAX_TILES) throw new Error(`too many tiles (${rows*cols}). max ${MAX_TILES}`);
 
     const { xs, ys } = buildCellBoundaries(W, H, rows, cols);
 
@@ -257,133 +600,68 @@
     return { tileW, tileH, n: rows*cols };
   }
 
-  function pixDiff(dataA, idxA, dataB, idxB) {
-    // RGBA
-    const dr = Math.abs(dataA[idxA] - dataB[idxB]);
-    const dg = Math.abs(dataA[idxA+1] - dataB[idxB+1]);
-    const db = Math.abs(dataA[idxA+2] - dataB[idxB+2]);
-    return dr + dg + db;
-  }
-
-  function buildScores(params, tileW, tileH, n) {
-    const band = Math.max(1, params.band);
+  // Extract the outer `kmax` pixel lines of every tile side, sampled every `step` px.
+  // Returns { edges:{L,R,T,B: [Float32Array(n*m*3), ...]}, mH, mV }
+  function extractEdges(params, tileW, tileH, n, kmax) {
     const step = Math.max(1, params.step);
-
-    // guard: band cannot exceed tile size
-    if (band >= tileW || band >= tileH) {
-      throw new Error(`band too large. tileW=${tileW}, tileH=${tileH}, band=${band}`);
+    if (kmax >= tileW || kmax >= tileH) {
+      throw new Error(`band too large. tileW=${tileW}, tileH=${tileH}, band=${kmax}`);
     }
-
-    scoreR = Array.from({length:n}, () => new Float64Array(n));
-    scoreD = Array.from({length:n}, () => new Float64Array(n));
+    const mH = Math.ceil(tileH / step);   // samples along a vertical seam (left/right sides)
+    const mV = Math.ceil(tileW / step);   // samples along a horizontal seam (top/bottom sides)
+    const mk = () => new Float32Array(n * mH * 3);
+    const mkv = () => new Float32Array(n * mV * 3);
+    const L = [], R = [], T = [], B = [];
+    for (let k=0;k<kmax;k++) { L.push(mk()); R.push(mk()); T.push(mkv()); B.push(mkv()); }
 
     for (let i=0;i<n;i++) {
       const A = tileData[i].data;
-      for (let j=0;j<n;j++) {
-        if (i === j) {
-          scoreR[i][j] = 1e15;
-          scoreD[i][j] = 1e15;
-          continue;
+      for (let k=0;k<kmax;k++) {
+        const l = L[k], rr = R[k], t = T[k], b = B[k];
+        for (let y=0, s=0; y<tileH; y+=step, s++) {
+          const o = (i*mH + s)*3;
+          const ia = (y*tileW + k)*4, ib = (y*tileW + (tileW-1-k))*4;
+          l[o]=A[ia]; l[o+1]=A[ia+1]; l[o+2]=A[ia+2];
+          rr[o]=A[ib]; rr[o+1]=A[ib+1]; rr[o+2]=A[ib+2];
         }
-        const B = tileData[j].data;
-
-        // right(i) -> left(j)
-        let sR = 0;
-        for (let y=0; y<tileH; y+=step) {
-          for (let k=0;k<band;k++) {
-            const xA = tileW - 1 - k;
-            const xB = k;
-            const idxA = (y*tileW + xA) * 4;
-            const idxB = (y*tileW + xB) * 4;
-            sR += pixDiff(A, idxA, B, idxB);
-          }
-        }
-
-        // bottom(i) -> top(j)
-        let sD = 0;
-        for (let x=0; x<tileW; x+=step) {
-          for (let k=0;k<band;k++) {
-            const yA = tileH - 1 - k;
-            const yB = k;
-            const idxA = (yA*tileW + x) * 4;
-            const idxB = (yB*tileW + x) * 4;
-            sD += pixDiff(A, idxA, B, idxB);
-          }
-        }
-
-        scoreR[i][j] = sR;
-        scoreD[i][j] = sD;
-      }
-    }
-  }
-
-  function usedHas(mask, t) {
-    return ((mask >> BigInt(t)) & 1n) === 1n;
-  }
-  function usedAdd(mask, t) {
-    return mask | (1n << BigInt(t));
-  }
-
-  function localCost(placed, pos, t, rows, cols) {
-    const r = Math.floor(pos / cols);
-    const c = pos % cols;
-    let cost = 0;
-    if (c > 0) {
-      const left = placed[pos - 1];
-      cost += scoreR[left][t];
-    }
-    if (r > 0) {
-      const up = placed[pos - cols];
-      cost += scoreD[up][t];
-    }
-    return cost;
-  }
-
-  async function beamSolve(params, n) {
-    const rows = params.rows, cols = params.cols;
-    const beamW = Math.max(1, params.beam);
-    const cand = Math.max(1, params.cand);
-
-    let states = [{ score: 0, used: 0n, placed: [] }];
-
-    for (let pos=0; pos<n; pos++) {
-      if (stopFlag) throw new Error("stopped");
-
-      const next = [];
-
-      for (const st of states) {
-        // candidate tiles by local cost (pick top cand)
-        const cands = [];
-        for (let t=0; t<n; t++) {
-          if (usedHas(st.used, t)) continue;
-          const lc = localCost(st.placed, pos, t, rows, cols);
-          cands.push([lc, t]);
-        }
-        cands.sort((a,b)=>a[0]-b[0]);
-        if (cands.length > cand) cands.length = cand;
-
-        for (const [lc, t] of cands) {
-          const placed = st.placed.slice();
-          placed.push(t);
-          next.push({
-            score: st.score + lc,
-            used: usedAdd(st.used, t),
-            placed
-          });
+        for (let x=0, s=0; x<tileW; x+=step, s++) {
+          const o = (i*mV + s)*3;
+          const ia = (k*tileW + x)*4, ib = ((tileH-1-k)*tileW + x)*4;
+          t[o]=A[ia]; t[o+1]=A[ia+1]; t[o+2]=A[ia+2];
+          b[o]=A[ib]; b[o+1]=A[ib+1]; b[o+2]=A[ib+2];
         }
       }
-
-      next.sort((a,b)=>a.score-b.score);
-      if (next.length > beamW) next.length = beamW;
-      states = next;
-
-      log(`pos ${pos+1}/${n}  beam=${states.length}  bestScore=${states[0].score.toFixed(2)}`);
-
-      // yield to UI
-      await new Promise(requestAnimationFrame);
     }
+    return { edges: { L, R, T, B }, mH, mV };
+  }
 
-    return states[0].placed;
+  function solveInWorker(params, tileW, tileH, n) {
+    const kmax = params.score === 'raw' ? Math.max(1, params.band) : 2;
+    const { edges, mH, mV } = extractEdges(params, tileW, tileH, n, kmax);
+
+    return new Promise((resolve, reject) => {
+      worker = new Worker(workerURL);
+      worker.onmessage = (ev) => {
+        const d = ev.data;
+        if (d.type === 'log') log(d.msg);
+        else if (d.type === 'done') { cleanup(); resolve(d); }
+        else if (d.type === 'error') { cleanup(); reject(new Error(d.msg)); }
+      };
+      worker.onerror = (e) => { cleanup(); reject(new Error(e.message || "worker error")); };
+      const cleanup = () => { if (worker) { worker.terminate(); worker = null; } };
+
+      const transfer = [];
+      for (const side of [edges.L, edges.R, edges.T, edges.B]) for (const a of side) transfer.push(a.buffer);
+      worker.postMessage({
+        type: 'solve',
+        rows: params.rows, cols: params.cols, mH, mV, edges,
+        params: {
+          score: params.score, norm: params.norm,
+          beam: Math.max(1, params.beam), cand: Math.max(1, params.cand),
+          orders: params.orders, refine: params.refine,
+        },
+      }, transfer);
+    });
   }
 
   function rotateRows(delta) {
@@ -509,7 +787,6 @@
 
   async function handleSolve() {
     try {
-      stopFlag = false;
       $("btnStop").disabled = false;
       $("btnSolve").disabled = true;
       setStatus("running");
@@ -522,12 +799,10 @@
       const { tileW, tileH, n } = cutTiles(params);
       log(`tiles: ${n}, tileW=${tileW}, tileH=${tileH}`);
 
-      log("build edge scores...");
-      buildScores(params, tileW, tileH, n);
-      log("scores built.");
-
-      log("beam search...");
-      mapping = await beamSolve(params, n);
+      log(`solve: score=${params.score} norm=${params.norm ? 1 : 0} beam=${params.beam} cand=${params.cand} orders=${params.orders} refine=${params.refine ? 1 : 0}`);
+      const res = await solveInWorker(params, tileW, tileH, n);
+      mapping = res.mapping;
+      log(`best cost=${res.cost.toFixed(3)}  (${(res.ms/1000).toFixed(2)} s)`);
 
       selectedPos = null;
       $("selInfo").textContent = "";
@@ -552,8 +827,14 @@
   }
 
   function handleStop() {
-    stopFlag = true;
-    log("stop requested...");
+    if (worker) {
+      worker.terminate();
+      worker = null;
+      setStatus("stopped");
+      log("stopped.");
+      $("btnStop").disabled = true;
+      $("btnSolve").disabled = false;
+    }
   }
 
   function enableButtonsOnImageLoaded() {
@@ -654,21 +935,21 @@
     const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
     cvOut._full = full;
   });
-  
+
   $("btnRowDown").addEventListener("click", () => {
     rotateRows(1);
     const p = readParams();
     const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
     cvOut._full = full;
   });
-  
+
   $("btnColLeft").addEventListener("click", () => {
     rotateCols(-1);
     const p = readParams();
     const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
     cvOut._full = full;
   });
-  
+
   $("btnColRight").addEventListener("click", () => {
     rotateCols(1);
     const p = readParams();
@@ -709,7 +990,6 @@
 
       $("btnSavePng").disabled = false;
       $("btnExportMap").disabled = false;
-
       setStatus("map loaded");
       log(`mapping loaded: ${file.name}`);
     } catch (e) {

@@ -28,8 +28,8 @@
 <body>
   <h1><a href="./webapp/" target="_blank">Tile Shuffle Image Solver (Web)</a></h1>
   <p class="small muted">
-    A browser-based tool to reconstruct grid-tiled images whose tiles were shuffled (no rotation), using edge similarity + beam search.
-    / タイル分割された画像（回転なし）のシャッフルを、境界一致＋ビームサーチで復元するブラウザアプリです。
+    A browser-based tool to reconstruct grid-tiled images whose tiles were shuffled (no rotation), using gradient-based edge compatibility (MGC) + beam search + local refinement.
+    / タイル分割された画像（回転なし）のシャッフルを、境界の勾配整合性（MGC）＋ビームサーチ＋局所探索で復元するブラウザアプリです。
   </p>
 
   <div class="grid">
@@ -39,14 +39,15 @@
       <h3>概要</h3>
       <p>
         本Webアプリは、画像を <b>rows×cols</b> のグリッドとして扱い、タイルの順序だけが入れ替わった画像を
-        <b>境界の画素差分</b>に基づいて推定し、<b>ビームサーチ</b>で自動復元します（タイル回転は扱いません）。
+        <b>境界の勾配整合性（MGC）</b>に基づいて推定し、<b>ビームサーチ＋局所探索</b>で自動復元します（タイル回転は扱いません）。
+        計算は Web Worker 上で行うため、実行中も画面は固まりません。
       </p>
 
       <h3>主な機能</h3>
       <ul>
         <li>画像読み込み（PNG/JPEG）</li>
-        <li>パラメータ設定（rows/cols/wm/hm/band/step/beam/cand ほか）</li>
-        <li>ビームサーチによる自動配置（完全シャッフル想定）</li>
+        <li>パラメータ設定（rows/cols/wm/hm/beam/cand ほか。詳細設定に score/orders/refine/band/step）</li>
+        <li>MGC スコア＋ビームサーチ＋局所探索による自動配置（完全シャッフル想定、最大 64 タイル）</li>
         <li>手動修正：タイルを<strong>2枚順にクリック</strong>で入れ替え（swap）</li>
         <li>行・列の循環シフト（ループスクロール）で上下左右のズレを一発補正</li>
         <li>Preview Zoom（スライダー）で出力プレビューを拡大縮小</li>
@@ -71,26 +72,28 @@
       <h3>パラメータの目安</h3>
       <table>
         <tr><th>パラメータ</th><th>推奨範囲</th><th>説明</th></tr>
-        <tr><td><code>rows</code>/<code>cols</code></td><td>3〜5</td><td>5×5以上は計算量が急増します</td></tr>
+        <tr><td><code>rows</code>/<code>cols</code></td><td>2〜7</td><td>7×7 まで既定値で数秒以内。最大 64 タイル</td></tr>
         <tr><td><code>Max Size</code></td><td>800〜1200</td><td>長辺を縮小して計算（速度/安定性に効きます）</td></tr>
-        <tr><td><code>beam</code></td><td>4×4: 800〜2000<br>5×5: 3000〜8000</td><td>大きいほど精度↑・時間↑</td></tr>
-        <tr><td><code>cand</code></td><td>4×4: 30〜60<br>5×5: 60〜120</td><td>各状態で試す候補タイル数</td></tr>
-        <tr><td><code>band</code></td><td><b>2〜3</b>（最大でも4程度）</td><td>境界比較幅。大きすぎると範囲外になりやすい</td></tr>
-        <tr><td><code>step</code></td><td>2〜3</td><td>比較の間引き。1は精密だが重い</td></tr>
-        <tr><td><code>wm</code>/<code>hm</code></td><td>0〜10</td><td>セル内トリム（境界ノイズ対策）</td></tr>
+        <tr><td><code>beam</code></td><td>1200（既定）</td><td>7×7 まで既定値で十分。誤りが残る場合のみ 3000〜5000 に</td></tr>
+        <tr><td><code>cand</code></td><td>40（既定）</td><td>各状態で試す候補タイル数</td></tr>
+        <tr><td><code>orders</code></td><td>4（既定）</td><td>走査順の数。1 にすると約 4 倍速いが局所解に落ちやすい</td></tr>
+        <tr><td><code>refine</code></td><td>on（既定）</td><td>探索後の局所探索（巡回シフト・2タイル交換）</td></tr>
+        <tr><td><code>score</code></td><td>mgc（既定）</td><td><code>raw</code> は旧来の画素差分（互換用）</td></tr>
+        <tr><td><code>band</code>/<code>step</code></td><td>3 / 1</td><td>band は raw スコア時のみ有効。step は境界サンプリング間隔</td></tr>
+        <tr><td><code>wm</code>/<code>hm</code></td><td>0〜10</td><td>セル内トリム（境界ノイズ対策）。境界がきれいな画像は 0 が最良</td></tr>
       </table>
 
       <div class="warn">
-        <b>band の注意</b><br>
-        <code>band</code> はタイル境界の比較幅（px）です。タイルが小さい状態で大きな値にすると、境界参照が範囲外になり
-        エラーや精度低下の原因になります。まずは <b>2</b> または <b>3</b> を推奨します。
+        <b>復元できないとき</b><br>
+        まず <code>wm</code>/<code>hm</code> を 0 にして再実行し、それでも崩れる場合は <code>beam</code> を上げてください。
+        星空や単色の空のように一様な領域内のタイル同士は境界情報では区別できないため、2タイルクリックで手動修正してください。
       </div>
 
       <h3>制限事項</h3>
       <ul>
         <li>タイルの回転（90°/180°）は非対応</li>
         <li>タイル欠損がある画像は非対応</li>
-        <li>均一な色・模様が多い画像では難しくなる場合があります</li>
+        <li>ほぼ一様な領域（星空・単色の空など）内では、タイル同士が入れ替わることがあります</li>
       </ul>
     </section>
 
@@ -100,14 +103,15 @@
       <h3>Overview</h3>
       <p>
         This web app reconstructs <b>grid-tiled</b> images whose tiles have been <b>shuffled in order</b> (no rotation),
-        using <b>pixel edge similarity</b> and <b>beam search</b>.
+        using <b>gradient-based edge compatibility (MGC)</b>, <b>beam search</b> and <b>local refinement</b>.
+        The solver runs in a Web Worker, so the page stays responsive.
       </p>
 
       <h3>Key Features</h3>
       <ul>
         <li>Load PNG/JPEG images</li>
-        <li>Adjust parameters (rows/cols/wm/hm/band/step/beam/cand, etc.)</li>
-        <li>Automatic placement via beam search (fully shuffled tiles)</li>
+        <li>Adjust parameters (rows/cols/wm/hm/beam/cand; score/orders/refine/band/step under Advanced)</li>
+        <li>Automatic placement via MGC scoring + beam search + local refinement (fully shuffled tiles, up to 64)</li>
         <li>Manual fix: click <strong>two tiles</strong> to swap</li>
         <li>Row/column cyclic shift (loop scroll) to quickly fix global offsets</li>
         <li>Preview Zoom slider (output preview scaling)</li>
@@ -132,26 +136,28 @@
       <h3>Practical Parameter Ranges</h3>
       <table>
         <tr><th>Parameter</th><th>Recommended Range</th><th>Notes</th></tr>
-        <tr><td><code>rows</code>/<code>cols</code></td><td>3–5</td><td>Search cost grows rapidly beyond 5×5</td></tr>
+        <tr><td><code>rows</code>/<code>cols</code></td><td>2–7</td><td>Up to 7×7 solves in seconds with defaults. Max 64 tiles</td></tr>
         <tr><td><code>Max Size</code></td><td>800–1200</td><td>Downscale longest side to improve speed/stability</td></tr>
-        <tr><td><code>beam</code></td><td>4×4: 800–2000<br>5×5: 3000–8000</td><td>Bigger beam improves accuracy but uses more time</td></tr>
-        <tr><td><code>cand</code></td><td>4×4: 30–60<br>5×5: 60–120</td><td>Candidate tiles expanded per state</td></tr>
-        <tr><td><code>band</code></td><td><b>2–3</b> (avoid &gt;4)</td><td>Edge comparison thickness in pixels</td></tr>
-        <tr><td><code>step</code></td><td>2–3</td><td>Sampling step. 1 is precise but slower</td></tr>
-        <tr><td><code>wm</code>/<code>hm</code></td><td>0–10</td><td>Inner trimming for boundary noise reduction</td></tr>
+        <tr><td><code>beam</code></td><td>1200 (default)</td><td>Enough up to 7×7; raise to 3000–5000 only if mistakes remain</td></tr>
+        <tr><td><code>cand</code></td><td>40 (default)</td><td>Candidate tiles expanded per state</td></tr>
+        <tr><td><code>orders</code></td><td>4 (default)</td><td>Traversal orders. 1 is ~4x faster but more prone to local minima</td></tr>
+        <tr><td><code>refine</code></td><td>on (default)</td><td>Local refinement after the search (cyclic shifts, pairwise swaps)</td></tr>
+        <tr><td><code>score</code></td><td>mgc (default)</td><td><code>raw</code> is the legacy L1 pixel difference</td></tr>
+        <tr><td><code>band</code>/<code>step</code></td><td>3 / 1</td><td>band applies to the raw score only; step is the seam sampling interval</td></tr>
+        <tr><td><code>wm</code>/<code>hm</code></td><td>0–10</td><td>Inner trimming for boundary noise. Use 0 for clean boundaries</td></tr>
       </table>
 
       <div class="warn">
-        <b>About <code>band</code></b><br>
-        <code>band</code> controls edge thickness (pixels). Too large values can cause out-of-bounds edge reads or
-        reduce accuracy due to over-averaging. Start with <b>2</b> or <b>3</b>.
+        <b>If the result is wrong</b><br>
+        Retry with <code>wm</code>/<code>hm</code> = 0 first, then raise <code>beam</code>.
+        Tiles inside a uniform region (starry sky, flat colour) cannot be told apart from boundary information; fix them with two-click swaps.
       </div>
 
       <h3>Limitations</h3>
       <ul>
         <li>Tile rotation (90°/180°) is not supported</li>
         <li>Missing tiles are not supported</li>
-        <li>Highly uniform images may be ambiguous</li>
+        <li>Tiles inside near-uniform regions (starry sky, flat colour) may be swapped with each other</li>
       </ul>
     </section>
   </div>
