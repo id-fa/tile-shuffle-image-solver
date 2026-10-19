@@ -46,6 +46,8 @@ class TileSolver
 
     private const INF = 1e15;
     private const MGC_EPS = 1.0;
+    /** upper bound on input pixels (W*H) so a crafted image cannot exhaust memory via GD */
+    private const MAX_PIXELS = 30_000_000;
 
     /* ---- image / geometry ---- */
     private GdImage $img;
@@ -73,6 +75,12 @@ class TileSolver
         $this->hm = $hm;
         $this->n = $rows * $cols;
 
+        if ($rows < 1 || $cols < 1) {
+            throw new Exception("rows/cols must be >= 1 (got rows={$rows}, cols={$cols})");
+        }
+        if ($wm < 0 || $hm < 0) {
+            throw new Exception("wm/hm must be >= 0 (got wm={$wm}, hm={$hm})");
+        }
         if ($this->n > 60) {
             throw new Exception("Too many tiles ({$this->n}). Max supported is 60.");
         }
@@ -82,20 +90,29 @@ class TileSolver
 
     public function load(string $path): void
     {
-        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        // Inspect the header first: decide the decoder by the real content (not the
+        // file extension) and refuse oversized images before GD allocates the bitmap.
+        $info = @getimagesize($path);
+        if ($info === false) throw new Exception("not a valid image: $path");
+        [$w, $h, $type] = $info;
+        if ($w < 1 || $h < 1 || $w * $h > self::MAX_PIXELS) {
+            throw new Exception("image too large ({$w}x{$h}); max " . self::MAX_PIXELS . " pixels");
+        }
 
-        if ($ext === 'jpg' || $ext === 'jpeg') {
+        if ($type === IMAGETYPE_JPEG) {
             $img = imagecreatefromjpeg($path);
-        } elseif ($ext === 'png') {
+        } elseif ($type === IMAGETYPE_PNG) {
             $img = imagecreatefrompng($path);
-            // PNG の alpha を保持
-            imagealphablending($img, false);
-            imagesavealpha($img, true);
         } else {
-            throw new Exception("unsupported image format: .$ext");
+            throw new Exception("unsupported image format: " . (image_type_to_mime_type($type) ?: 'unknown') . " (JPEG/PNG only)");
         }
 
         if (!$img) throw new Exception("failed to load image");
+        if ($type === IMAGETYPE_PNG) {
+            // PNG の alpha を保持
+            imagealphablending($img, false);
+            imagesavealpha($img, true);
+        }
 
         $this->img = $img;
         $this->W = imagesx($img);

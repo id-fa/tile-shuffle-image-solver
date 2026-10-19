@@ -144,7 +144,7 @@
 
     <h4>使い方</h4>
     <ol>
-      <li><b>Image</b> でシャッフルされた画像（PNG / JPEG）を選びます。画像はブラウザ内だけで処理され、外部には送信されません。</li>
+      <li><b>Image</b> でシャッフルされた画像（PNG / JPEG）を選びます。画像はブラウザ内だけで処理され、画像データが外部に送信されることはありません（アクセス解析のために Google Analytics を使用しています）。</li>
       <li><b>rows / cols</b> を画像の分割数（縦 × 横）に合わせます。ほかは通常、既定値のままで構いません。</li>
       <li><b>Auto Solve</b> を押すと復元結果が Output に表示されます。途中でやめるときは <b>Stop</b>。</li>
       <li>誤りが残った場合は、Output 上のタイルを 2 枚順にクリックして入れ替えます。全体が行・列単位でずれているときは <b>Quick Adjust</b> の矢印で 1 行 / 1 列ずつ巡回させます。</li>
@@ -533,6 +533,7 @@ self.onmessage = (ev) => {
   let tileData = [];       // per tile: {w,h,data:Uint8ClampedArray}
 
   let mapping = null;      // output position -> tile index
+  let solved = null;       // {rows, cols, tileW, tileH, full} geometry of `mapping` (fixed at solve / import time)
   let selectedPos = null;  // for manual swap
   let worker = null;
 
@@ -559,26 +560,40 @@ self.onmessage = (ev) => {
     zoomLabel.textContent = `${zoomSlider.value}%`;
 
     // すでに結果が描画されている場合は再描画
-    if (mapping && cvOut._full) {
-      const params = readParams();
-      const full = renderOutput(params, cvOut._tileW, cvOut._tileH);
-      cvOut._full = full;
-    }
+    redraw();
   });
 
+  // re-render the output from `mapping` using the geometry stored in `solved`
+  function redraw() {
+    if (!mapping || !solved) return;
+    solved.full = renderOutput(solved.rows, solved.cols, solved.tileW, solved.tileH);
+  }
+
+  // integer input clamped to the element's min/max; invalid text falls back to `fallback`
+  function numParam(id, fallback) {
+    const el = $(id);
+    let v = parseInt(el.value, 10);
+    if (!Number.isFinite(v)) v = fallback;
+    const lo = parseInt(el.min, 10), hi = parseInt(el.max, 10);
+    if (Number.isFinite(lo)) v = Math.max(lo, v);
+    if (Number.isFinite(hi)) v = Math.min(hi, v);
+    if (String(v) !== el.value) el.value = String(v);
+    return v;
+  }
+
   function readParams() {
-    const rows = parseInt($("rows").value, 10);
-    const cols = parseInt($("cols").value, 10);
-    const wm = parseInt($("wm").value, 10);
-    const hm = parseInt($("hm").value, 10);
-    const band = parseInt($("band").value, 10);
-    const step = parseInt($("step").value, 10);
-    const beam = parseInt($("beam").value, 10);
-    const cand = parseInt($("cand").value, 10);
-    const maxSize = parseInt($("maxSize").value, 10);
-    const score = $("score").value;
+    const rows = numParam("rows", 4);
+    const cols = numParam("cols", 4);
+    const wm = numParam("wm", 6);
+    const hm = numParam("hm", 4);
+    const band = numParam("band", 3);
+    const step = numParam("step", 1);
+    const beam = numParam("beam", 1200);
+    const cand = numParam("cand", 40);
+    const maxSize = numParam("maxSize", 1200);
+    const score = $("score").value === 'raw' ? 'raw' : 'mgc';
     const norm = $("norm").checked;
-    const orders = parseInt($("orders").value, 10);
+    const orders = numParam("orders", 4);
     const refine = $("refine").checked;
 
     return { rows, cols, wm, hm, band, step, beam, cand, maxSize, score, norm, orders, refine };
@@ -728,8 +743,8 @@ self.onmessage = (ev) => {
 
   function rotateRows(delta) {
     // delta: -1 = up, +1 = down
-    if (!mapping) return;
-    const { rows, cols } = readParams();
+    if (!mapping || !solved) return;
+    const { rows, cols } = solved;
     const out = new Array(mapping.length);
 
     for (let r = 0; r < rows; r++) {
@@ -743,8 +758,8 @@ self.onmessage = (ev) => {
 
   function rotateCols(delta) {
     // delta: -1 = left, +1 = right
-    if (!mapping) return;
-    const { rows, cols } = readParams();
+    if (!mapping || !solved) return;
+    const { rows, cols } = solved;
     const out = new Array(mapping.length);
 
     for (let r = 0; r < rows; r++) {
@@ -756,8 +771,7 @@ self.onmessage = (ev) => {
     mapping = out;
   }
 
-  function renderOutput(params, tileW, tileH) {
-    const rows = params.rows, cols = params.cols;
+  function renderOutput(rows, cols, tileW, tileH) {
     const outW = tileW * cols;
     const outH = tileH * rows;
 
@@ -800,8 +814,8 @@ self.onmessage = (ev) => {
     return full; // full-res canvas
   }
 
-  function exportMappingText(params) {
-    const rows = params.rows, cols = params.cols;
+  function exportMappingText() {
+    const { rows, cols } = solved;
     let lines = [];
     for (let r=0;r<rows;r++) {
       const row = [];
@@ -868,14 +882,10 @@ self.onmessage = (ev) => {
 
       selectedPos = null;
       $("selInfo").textContent = "";
-      const full = renderOutput(params, tileW, tileH);
+      solved = { rows: params.rows, cols: params.cols, tileW, tileH, full: null };
+      redraw();   // also keeps the full-res canvas in solved.full for saving
       $("btnSavePng").disabled = false;
       $("btnExportMap").disabled = false;
-
-      // keep full canvas for saving
-      cvOut._full = full;
-      cvOut._tileW = tileW;
-      cvOut._tileH = tileH;
 
       setStatus("done");
       log("done.");
@@ -905,10 +915,9 @@ self.onmessage = (ev) => {
 
   // Manual swap by clicking output canvas
   cvOut.addEventListener("click", (ev) => {
-    if (!mapping || !cvOut._full) return;
+    if (!mapping || !solved) return;
 
-    const params = readParams();
-    const rows = params.rows, cols = params.cols;
+    const { rows, cols } = solved;
 
     const rect = cvOut.getBoundingClientRect();
     const x = (ev.clientX - rect.left) / rect.width * cvOut.width;
@@ -936,8 +945,7 @@ self.onmessage = (ev) => {
     }
 
     // re-render
-    const full = renderOutput(params, cvOut._tileW, cvOut._tileH);
-    cvOut._full = full;
+    redraw();
   });
 
   // File input
@@ -962,7 +970,7 @@ self.onmessage = (ev) => {
         selectedPos = null;
         $("btnSavePng").disabled = true;
         $("btnExportMap").disabled = true;
-        cvOut._full = null;
+        solved = null;
 
         enableButtonsOnImageLoaded();
         setStatus("ready");
@@ -993,42 +1001,32 @@ self.onmessage = (ev) => {
 
   $("btnRowUp").addEventListener("click", () => {
     rotateRows(-1);
-    const p = readParams();
-    const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
-    cvOut._full = full;
+    redraw();
   });
 
   $("btnRowDown").addEventListener("click", () => {
     rotateRows(1);
-    const p = readParams();
-    const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
-    cvOut._full = full;
+    redraw();
   });
 
   $("btnColLeft").addEventListener("click", () => {
     rotateCols(-1);
-    const p = readParams();
-    const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
-    cvOut._full = full;
+    redraw();
   });
 
   $("btnColRight").addEventListener("click", () => {
     rotateCols(1);
-    const p = readParams();
-    const full = renderOutput(p, cvOut._tileW, cvOut._tileH);
-    cvOut._full = full;
+    redraw();
   });
 
   $("btnSavePng").addEventListener("click", () => {
-    if (!cvOut._full) return;
-    downloadCanvasPNG("solved.png", cvOut._full);
+    if (!solved || !solved.full) return;
+    downloadCanvasPNG("solved.png", solved.full);
   });
 
   $("btnExportMap").addEventListener("click", () => {
-    if (!mapping) return;
-    const params = readParams();
-    const text = exportMappingText(params);
-    downloadText("mapping.txt", text);
+    if (!mapping || !solved) return;
+    downloadText("mapping.txt", exportMappingText());
   });
 
   $("mapInput").addEventListener("change", async (ev) => {
@@ -1045,10 +1043,8 @@ self.onmessage = (ev) => {
 
       selectedPos = null;
       $("selInfo").textContent = "";
-      const full = renderOutput(params, tileW, tileH);
-      cvOut._full = full;
-      cvOut._tileW = tileW;
-      cvOut._tileH = tileH;
+      solved = { rows: params.rows, cols: params.cols, tileW, tileH, full: null };
+      redraw();
 
       $("btnSavePng").disabled = false;
       $("btnExportMap").disabled = false;
